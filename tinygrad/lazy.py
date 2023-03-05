@@ -213,14 +213,14 @@ class LazyBuffer:
       def get_contraction(old_shape:Tuple[int, ...], new_shape:Tuple[int, ...]):
         new_shape_i: int = 0
         numbered : List[List[int]] = []
-        sub_shapes : List[int] = [[] for _ in range(len(new_shape))]
+        shape_groups : List[int] = [[] for _ in range(len(new_shape))]
         for old_shape_i, t in enumerate(old_shape):
-          if not sub_shapes[new_shape_i]: numbered.append([])
+          if not shape_groups[new_shape_i]: numbered.append([])
           numbered[-1].append(old_shape_i)
-          sub_shapes[new_shape_i].append(t)
-          if prod(sub_shapes[new_shape_i]) > new_shape[new_shape_i] or new_shape[new_shape_i] % t != 0:
+          shape_groups[new_shape_i].append(t)
+          if prod(shape_groups[new_shape_i]) > new_shape[new_shape_i] or new_shape[new_shape_i] % t != 0:
             return None
-          elif prod(sub_shapes[new_shape_i]) == new_shape[new_shape_i]:
+          elif prod(shape_groups[new_shape_i]) == new_shape[new_shape_i]:
             new_shape_i += 1
         return numbered
       numbered = get_contraction(self.shape, local_st.shape)
