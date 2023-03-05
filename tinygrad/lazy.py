@@ -209,28 +209,22 @@ class LazyBuffer:
 
     # move permutes before reshapes if we can
     if op == MovementOps.PERMUTE and PUSH_PERMUTES and self.realized is None and self.op.op == MovementOps.RESHAPE and isinstance(self.op.src[0], LazyBuffer):
-      # TODO: this is atrocious code
       # is contract? if so, group the axis
       def get_contraction(old_shape:Tuple[int, ...], new_shape:Tuple[int, ...]):
-        out : List[List[int]] = []
-        curr : List[int] = []
-        for t in old_shape:
-          if len(out) >= len(new_shape): break
-          if t*prod(curr) <= new_shape[len(out)]:
-            curr.append(t)
-          else:
-            out.append(curr)
-            curr = [t]
-        out.append(curr)
-        if len(new_shape) == len(out) and all(prod(i) == j and len(i) >= 1 for i,j in zip(out, new_shape)):
-          return out
-      contraction = get_contraction(self.op.src[0].shape, self.shape)
-      if contraction is not None:
-        numbered = []
-        start = 0
-        for c in contraction:
-          numbered.append(list(range(start, start+len(c))))
-          start += len(c)
+        new_shape_i: int = 0
+        numbered : List[List[int]] = []
+        sub_shapes : List[int] = [[] for _ in range(len(new_shape))]
+        for old_shape_i, t in enumerate(old_shape):
+          if not sub_shapes[new_shape_i]: numbered.append([])
+          numbered[-1].append(old_shape_i)
+          sub_shapes[new_shape_i].append(t)
+          if prod(sub_shapes[new_shape_i]) > new_shape[new_shape_i] or new_shape[new_shape_i] % t != 0:
+            return None
+          elif prod(sub_shapes[new_shape_i]) == new_shape[new_shape_i]:
+            new_shape_i += 1
+        return numbered
+      numbered = get_contraction(self.shape, local_st.shape)
+      if numbered is not None:
         new_arg = []
         for p in arg:
           new_arg += numbered[p]
