@@ -41,5 +41,19 @@ class TestDtype(unittest.TestCase):
     assert c.dtype == dtypes.float32
     np.testing.assert_allclose(c.numpy(), [2,4,6,8])
 
+  def test_half_add_upcast_int8(self):
+    a = Tensor([1,2,3,4], dtype=dtypes.int8)
+    b = Tensor([1,2,3,4], dtype=dtypes.float32)
+    c = a+b
+    assert c.dtype == dtypes.float32
+    np.testing.assert_allclose(c.numpy(), [2,4,6,8])
+
+  def test_half_add_upcast_uint8(self):
+    a = Tensor([1,2,3,4], dtype=dtypes.uint8)
+    b = Tensor([1,2,3,4], dtype=dtypes.float32)
+    c = a+b
+    assert c.dtype == dtypes.float32
+    np.testing.assert_allclose(c.numpy(), [2,4,6,8])
+
 if __name__ == '__main__':
   unittest.main()

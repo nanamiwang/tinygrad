@@ -36,10 +36,12 @@ class LazyNumpyArray:
   def astype(self, typ): return self
 
 class dtypes:
+  int8: Final[DType] = DType(2, "char", np.uint8)
+  uint8: Final[DType] = DType(2, "unsigned char", np.uint8)
   float16: Final[DType] = DType(2, "half", np.float16)
   float32: Final[DType] = DType(4, "float", np.float32)
   @staticmethod
-  def from_np(x:Union[LazyNumpyArray, np.ndarray]) -> DType: return {np.dtype(np.float16): dtypes.float16, np.dtype(np.float32): dtypes.float32}[np.dtype(x.dtype)]
+  def from_np(x:Union[LazyNumpyArray, np.ndarray]) -> DType: return {np.dtype(np.float16): dtypes.float16, np.dtype(np.float32): dtypes.float32, np.dtype(np.int8): dtypes.int8, np.dtype(np.uint8): dtypes.uint8}[np.dtype(x.dtype)]
 
 class GlobalCounters:
   global_ops: ClassVar[int] = 0

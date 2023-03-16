@@ -5,7 +5,7 @@ import tempfile, platform
 from collections import defaultdict
 from tinygrad.helpers import prod, getenv, DEBUG
 from tinygrad.ops import GlobalCounters
-from tinygrad.tensor import Tensor
+from tinygrad.tensor import Tensor, dtypes
 from tinygrad.lazy import LazyNumpyArray, Device
 from tinygrad.shape.shapetracker import strides_for_shape
 OSX = platform.system() == "Darwin"
@@ -45,7 +45,11 @@ def my_unpickle(fb0):
       if DEBUG: print(f"unsupported type {storage_type} on {obj_key} with shape {size}")
       ret = None
     else:
-      ret = Tensor(LazyNumpyArray(lambda lst: np.zeros(lst.shape, dtype=lst.dtype), tuple(size), storage_type))
+      if len(size) == 2 and storage_type == np.float16:
+        # compress the weights into uint8
+        ret = Tensor(LazyNumpyArray(lambda lst: np.zeros(lst.shape, dtype=lst.dtype), tuple(size), np.uint8))
+      else:
+        ret = Tensor(LazyNumpyArray(lambda lst: np.zeros(lst.shape, dtype=lst.dtype), tuple(size), storage_type))
     key_prelookup[obj_key].append((storage_type, obj_size, ret, size, stride, storage_offset))
     return ret
 
@@ -89,7 +93,9 @@ def load_single_weight(t:Tensor, myfile, shape, strides, dtype, storage_offset, 
     myfile.seek(bytes_offset)
 
   assert t.shape == shape or shape == tuple(), f"shape mismatch {t.shape} != {shape}"
-  assert t.dtype.np == dtype and t.dtype.itemsize == bytes_size
+
+  if len(shape) != 2:
+    assert t.dtype.np == dtype and t.dtype.itemsize == bytes_size
   if any(s != 1 and st1 != st2 for s, st1, st2 in zip(shape, strides_for_shape(shape), strides)):
     # slow path
     buffer_size = sum(strides[i]*t.dtype.itemsize * (shape[i] - 1) for i in range(len(shape)))
@@ -104,6 +110,20 @@ def load_single_weight(t:Tensor, myfile, shape, strides, dtype, storage_offset, 
     t.realize()
     return
 
+  if len(shape) == 2 and dtype == dtypes.float16:
+    print('load weights', shape)
+    def quantize_q8_0(f16):
+      print('compressing weights', shape)
+      assert f16.dtype == dtypes.float16
+      QK = 32
+      amax = f16.abs().max() / 127.0
+      id = (1.0 / amax) if amax.numpy != 0 else 0.0
+      q8_0 = Tensor((f16 * id + 128.0).numpy(), dtype=dtypes.uint8)
+      return q8_0.numpy()
+    t.lazydata.op.arg.fxn = quantize_q8_0
+    t.realize()
+    return
+  
   # ["METAL", "CLANG", "LLVM"] support readinto for more speed
   # ["GPU", "CUDA"] use _mmap since they have to copy in to the GPU anyway
   # this needs real APIs
