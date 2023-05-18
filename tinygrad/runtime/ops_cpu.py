@@ -1,20 +1,19 @@
 import numpy as np
 import operator
-from typing import ClassVar, Callable, Dict, Tuple
+from typing import Callable, Dict, Tuple
 from tinygrad.helpers import dtypes
-from tinygrad.ops import UnaryOps, BinaryOps, MovementOps, ReduceOps, FusedOps, LoadOps, Op
-from tinygrad.interpreted import InterpretedBuffer
+from tinygrad.ops import UnaryOps, BinaryOps, MovementOps, ReduceOps, FusedOps, Op, Interpreted
+from tinygrad.runtime.lib import RawBuffer
 
 def shape_to_axis(old_shape:Tuple[int, ...], new_shape:Tuple[int, ...]) -> Tuple[int, ...]:
   assert len(old_shape) == len(new_shape), "reduce shapes must have same dimensions"
   return tuple(i for i,(a,b) in enumerate(zip(old_shape, new_shape)) if a != b)
 
 base_fxn_for_op: Dict[Op, Callable] = {
-  UnaryOps.NEG: lambda x: -x, UnaryOps.NOT: lambda x: (1.0 - x),
   BinaryOps.ADD: operator.add, BinaryOps.SUB: operator.sub, BinaryOps.MUL: operator.mul, BinaryOps.DIV: operator.truediv, BinaryOps.POW: operator.pow,
   ReduceOps.SUM: lambda x, new_shape: x.sum(shape_to_axis(x.shape, new_shape), keepdims=True) if tuple(x.shape) != tuple(new_shape) else x[:],
   ReduceOps.MAX: lambda x, new_shape: (x.amax if hasattr(x, 'amax') else x.max)(shape_to_axis(x.shape, new_shape), keepdims=True) if tuple(x.shape) != tuple(new_shape) else x[:],
-  MovementOps.SHRINK: lambda x, arg: x[tuple(slice(p[0], p[1], None) for p in arg)],
+  MovementOps.RESHAPE: lambda x, arg: x.reshape(arg), MovementOps.SHRINK: lambda x, arg: x[tuple(slice(p[0], p[1], None) for p in arg)],
 }
 
 def einsum_mulacc(einsum, get_strides, expand):
@@ -28,15 +27,16 @@ def einsum_mulacc(einsum, get_strides, expand):
   return mulacc
 
 numpy_fxn_for_op: Dict[Op, Callable] = {**base_fxn_for_op, **{
-  UnaryOps.NOOP: np.ascontiguousarray, UnaryOps.EXP: np.exp, UnaryOps.LOG: np.log,
+  UnaryOps.NOOP: lambda x: np.require(x, requirements='C'), UnaryOps.EXP: np.exp, UnaryOps.LOG: np.log, UnaryOps.CAST: lambda x,y: x.astype(y.np),
   BinaryOps.MAX: np.maximum, BinaryOps.CMPEQ: lambda x,y: (x==y).astype(np.float32),
   MovementOps.PERMUTE: lambda x, order: x.transpose(order), MovementOps.PAD: np.pad, MovementOps.EXPAND: np.broadcast_to,
   MovementOps.STRIDE: lambda x, arg: x[tuple(slice(None, None, i) for i in arg)],
   FusedOps.MULACC: einsum_mulacc(lambda s,a,b: np.einsum(s, a.copy(), b.copy()), lambda x: x.strides, np.broadcast_to),
-  LoadOps.FROMCPU: lambda arg: arg
 }}
 
-class CPUBuffer(InterpretedBuffer):
-  fxn_for_op: ClassVar[Dict[Op, Callable]] = numpy_fxn_for_op
-  def to_tinygrad_dtype(self): return dtypes.from_np(self._buf)
+class RawNumpyBuffer(RawBuffer):
+  def __init__(self, buf:np.ndarray): super().__init__(buf.size, dtypes.from_np(buf.dtype), buf)
+  @classmethod
+  def fromCPU(cls, x): return cls(x)
   def toCPU(self): return self._buf
+CPUBuffer = Interpreted(RawNumpyBuffer, numpy_fxn_for_op)

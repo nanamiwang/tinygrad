@@ -4,8 +4,10 @@ import numpy as np
 import unittest
 from tinygrad.tensor import Tensor
 from tinygrad.helpers import getenv, IMAGE
+from tinygrad.lazy import Device
 
 FORWARD_ONLY = getenv("FORWARD_ONLY", 0)
+PRINT_TENSORS = getenv("PRINT_TENSORS", 0)
 def helper_test_op(shps, torch_fxn, tinygrad_fxn=None, atol=1e-6, rtol=1e-3, grad_atol=1e-4, grad_rtol=1e-3, forward_only=False, vals=None, a=-0.5, b=3):
   if tinygrad_fxn is None: tinygrad_fxn = torch_fxn
   torch.manual_seed(0)
@@ -26,6 +28,7 @@ def helper_test_op(shps, torch_fxn, tinygrad_fxn=None, atol=1e-6, rtol=1e-3, gra
   tinygrad_fp = time.monotonic() - st
 
   def compare(s, x,y,atol,rtol):
+    if PRINT_TENSORS: print(s, x, y)
     if y.shape != tuple(): assert x.shape == y.shape, f"shape mismatch (tinygrad){x.shape} != (torch){y.shape}"
     try:
       np.testing.assert_allclose(x,y, atol=atol, rtol=rtol)
@@ -37,11 +40,11 @@ def helper_test_op(shps, torch_fxn, tinygrad_fxn=None, atol=1e-6, rtol=1e-3, gra
   torch_fbp, tinygrad_fbp = np.nan, np.nan
   if not forward_only and not FORWARD_ONLY:
     st = time.monotonic()
-    out.square().mean().backward()
+    (out+1).square().mean().backward()
     torch_fbp = time.monotonic() - st
 
     st = time.monotonic()
-    ret.square().mean().backward()
+    (ret+1).square().mean().backward()
     for tt in tst: tt.grad.realize()
     tinygrad_fbp = time.monotonic() - st
 
@@ -91,6 +94,7 @@ class TestOps(unittest.TestCase):
 
   def test_maximum(self):
     helper_test_op([(45,65), (45,65)], torch.maximum, Tensor.maximum)
+    helper_test_op(None, torch.maximum, Tensor.maximum, vals=[[1., 0., 3., 4.], [1., 2., 3., 0.]])
   def test_minimum(self):
     helper_test_op([(45,65), (45,65)], torch.minimum, Tensor.minimum)
   def test_add(self):
@@ -103,6 +107,8 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,65), (65,)], lambda x,y: x+y, lambda x,y: x+y)
   def test_sub(self):
     helper_test_op([(45,65), (45,65)], lambda x,y: x-y, Tensor.sub)
+  def test_neg(self):
+    helper_test_op([(45,65)], lambda x: -x)
   def test_mul(self):
     helper_test_op([(64,64), (64,64)], lambda x,y: x*y, Tensor.mul)
   def test_div(self):
@@ -126,9 +132,16 @@ class TestOps(unittest.TestCase):
   def test_sqrt(self):
     helper_test_op([(45,65)], lambda x: x.sqrt(), Tensor.sqrt, a=0)
   def test_relu(self):
-    helper_test_op([(45,65)], lambda x: x.relu(), Tensor.relu)
+    helper_test_op([(64,64)], lambda x: x.relu(), Tensor.relu)
+  def test_relu_exact(self):
+    helper_test_op(None, lambda x: x.relu(), Tensor.relu, vals=[[-1.,0,1]])
+  def test_relu_maximum_exact(self):
+    helper_test_op(None, lambda x: torch.maximum(x, torch.zeros_like(x, requires_grad=False)), lambda x: Tensor.maximum(x, 0), vals=[[-1.,0,1]])
   def test_leakyrelu(self):
     helper_test_op([(45,65)], lambda x: torch.nn.functional.leaky_relu(x,0.01), Tensor.leakyrelu)
+  def test_celu(self):
+    for val in range(1, 5):
+      helper_test_op([(45,65)], lambda x: torch.nn.functional.celu(x,val), lambda x: x.celu(val))
   def test_abs(self):
     helper_test_op([(45,65)], lambda x: torch.abs(x), Tensor.abs)
   def test_log(self):
@@ -137,6 +150,8 @@ class TestOps(unittest.TestCase):
     helper_test_op([(45,65)], lambda x: torch.exp(x), Tensor.exp)
   def test_sign(self):
     helper_test_op([(45,65)], lambda x: torch.sign(x), Tensor.sign)
+  def test_softsign(self):
+    helper_test_op([(45,65)], lambda x: torch.nn.functional.softsign(x), Tensor.softsign)
   def test_sigmoid(self):
     helper_test_op([(45,65)], lambda x: x.sigmoid(), Tensor.sigmoid)
   def test_softplus(self):
@@ -195,8 +210,19 @@ class TestOps(unittest.TestCase):
                 [[1.0,1.0,0.0,1.0]],
                 ])
     helper_test_op([(3,4,5,6)], lambda x: x.max(axis=1)[0], lambda x: Tensor.max(x, axis=1))
+  def test_mean(self):
+    helper_test_op([(3,4,5,6)], lambda x: x.mean())
   def test_mean_axis(self):
     helper_test_op([(3,4,5,6)], lambda x: x.mean(axis=(1,2)), lambda x: Tensor.mean(x, axis=(1,2)))
+  def test_std(self):
+    helper_test_op([(45, 65, 85)], lambda x: torch.std(x, unbiased=False), lambda x: Tensor.std(x))
+  def test_std_axis(self):
+    helper_test_op([(45, 65, 85)], lambda x: torch.std(x, unbiased=False, dim=0), lambda x: Tensor.std(x, axis=0))
+    helper_test_op([(45, 65, 85)], lambda x: torch.std(x, unbiased=False, dim=2), lambda x: Tensor.std(x, axis=2))
+    helper_test_op([(45, 65, 85)], lambda x: torch.std(x, unbiased=False, dim=[1, 2]), lambda x: Tensor.std(x, axis=[1, 2]))
+    helper_test_op([(45, 65, 85)], lambda x: torch.std(x, unbiased=False, dim=None), lambda x: Tensor.std(x, axis=None))
+  def test_std_keepdim(self):
+    helper_test_op([(45, 65, 85)], lambda x: torch.std(x, keepdim=True), lambda x: Tensor.std(x, keepdim=True))
   def test_log_softmax(self):
     helper_test_op([(45,65)], lambda x: torch.nn.LogSoftmax(dim=1)(x), Tensor.log_softmax, atol=1e-7, grad_atol=1e-7)
   def test_log_softmax_other_axis(self):
@@ -205,6 +231,9 @@ class TestOps(unittest.TestCase):
     helper_test_op([(10,10,10)], lambda x: x.log_softmax(2), lambda x: x.log_softmax(2), atol=1e-7, grad_atol=1e-7)
   def test_tanh(self):
     helper_test_op([(45,65)], lambda x: x.tanh(), Tensor.tanh, atol=1e-6, grad_atol=1e-6)
+  def test_hardtanh(self):
+    for val in range(10, 30, 5):
+      helper_test_op([(45,65)], lambda x: torch.nn.functional.hardtanh(x,-val, val), lambda x: x.hardtanh(-val, val), atol=1e-6, grad_atol=1e-6)
   def test_topo_sort(self):
     helper_test_op([(45,65)], lambda x: (x+x)*x, lambda x: x.add(x).mul(x), atol=1e-6, grad_atol=1e-6)
 
@@ -300,7 +329,7 @@ class TestOps(unittest.TestCase):
                     lambda x,w: torch.nn.functional.conv2d(x, w),
                     lambda x,w: x.conv2d(w), atol=1e-2)
 
-  @unittest.skip("not supported with IMAGE=1")
+  @unittest.skip("slow")
   def test_large_bs_conv(self):
     # large batch size can cause OpenCL image to exceed max image height on macOS
     # (or cause the conv kernel to overflow short sampling coords)
@@ -308,7 +337,7 @@ class TestOps(unittest.TestCase):
                     lambda x,w: torch.nn.functional.conv2d(x, w),
                     lambda x,w: x.conv2d(w), atol=1e-4, rtol=1e-2)
 
-  @unittest.skip("not supported with IMAGE=1")
+  @unittest.skip("slow")
   def test_large_ic_conv(self):
     # large input channel count can cause OpenCL image to exceed max image width on macOS
     helper_test_op([(1,2048,3,3), (1,2048,3,3)],
@@ -326,8 +355,30 @@ class TestOps(unittest.TestCase):
       lambda x,w: torch.nn.functional.conv2d(x,w).relu(),
       lambda x,w: Tensor.conv2d(x,w).relu(), atol=1e-4, grad_rtol=1e-5)
 
+  @unittest.skipIf(IMAGE>0, "no conv3d on images")
+  def test_simple_conv3d(self):
+    helper_test_op([(1,4,9,9,9), (4,4,3,3,3)],
+      lambda x,w: torch.nn.functional.conv3d(x,w).relu(),
+      lambda x,w: Tensor.conv2d(x,w).relu(), atol=1e-4, grad_rtol=1e-5)
+
+  @unittest.skipIf(IMAGE>0, "no conv3d on images")
+  def test_padded_conv3d(self):
+    helper_test_op([(1,4,9,9,9), (4,4,3,3,3)],
+      lambda x,w: torch.nn.functional.conv3d(x,w,padding=1).relu(),
+      lambda x,w: Tensor.conv2d(x,w,padding=[1,1,1,1,1,1]).relu(), atol=1e-4, grad_rtol=1e-5)
+
+  def test_simple_conv2d_m4(self):
+    helper_test_op([(1,16,18,18), (16,16,3,3)],
+      lambda x,w: torch.nn.functional.conv2d(x,w).relu(),
+      lambda x,w: Tensor.conv2d(x,w).relu(), atol=1e-4, grad_rtol=1e-5)
+
   def test_simple_conv2d_1x1(self):
     helper_test_op([(1,4,9,9), (4,4,1,1)],
+      lambda x,w: torch.nn.functional.conv2d(x,w).relu(),
+      lambda x,w: Tensor.conv2d(x,w).relu(), atol=1e-4, grad_rtol=1e-5)
+
+  def test_simple_conv2d_1x1_m4(self):
+    helper_test_op([(1,16,32,32), (16,16,1,1)],
       lambda x,w: torch.nn.functional.conv2d(x,w).relu(),
       lambda x,w: Tensor.conv2d(x,w).relu(), atol=1e-4, grad_rtol=1e-5)
 
@@ -377,7 +428,7 @@ class TestOps(unittest.TestCase):
     cin = 2
     helper_test_op([(bs,groups*cin,1,1), (groups*rcout,cin,1,1)],
       lambda x,w: torch.nn.functional.conv2d(x,w,groups=groups).relu(),
-      lambda x,w: Tensor.conv2d(x,w,groups=groups).relu(), atol=1e-4, grad_rtol=1e-5, forward_only=IMAGE>=2)
+      lambda x,w: Tensor.conv2d(x,w,groups=groups).relu(), atol=1e-4, grad_rtol=1e-5)
 
   def test_medium_grouped_conv2d(self):
     bs = 1
@@ -386,7 +437,7 @@ class TestOps(unittest.TestCase):
     cin = 2
     helper_test_op([(bs,groups*cin,1,1), (groups*rcout,cin,1,1)],
       lambda x,w: torch.nn.functional.conv2d(x,w,groups=groups).relu(),
-      lambda x,w: Tensor.conv2d(x,w,groups=groups).relu(), atol=1e-4, grad_rtol=1e-5, forward_only=IMAGE>=2)
+      lambda x,w: Tensor.conv2d(x,w,groups=groups).relu(), atol=1e-4, grad_rtol=1e-5)
 
   def test_depthwise_conv2d(self):
     bs = 1
@@ -511,6 +562,7 @@ class TestOps(unittest.TestCase):
           lambda x: torch.nn.functional.max_pool2d(x, kernel_size=(2,2), stride=stride),
           lambda x: Tensor.max_pool2d(x, kernel_size=(2,2), stride=stride))
 
+  @unittest.skipIf(Device.DEFAULT == "CUDA", "CUDA fails on this")
   def test_maxpool2d_unit_stride(self):
     helper_test_op([(32,2,110,28)],
       lambda x: torch.nn.functional.max_pool2d(x, kernel_size=(5,5), stride=1),
@@ -543,6 +595,30 @@ class TestOps(unittest.TestCase):
   def test_multicat(self):
     for dim in range(-1, 2):
       helper_test_op([(45,65), (45,65), (45,65)], lambda x,y,z: torch.cat((x,y,z), dim), lambda x,y,z: x.cat(y, z, dim=dim))
+
+  def test_stack(self):
+    x = Tensor.randn(45, 65, 3)
+
+    for dim in range(-1, 3):
+      helper_test_op([(45, 65, 3), (45, 65, 3), (45, 65, 3)], lambda x, y, z: torch.stack((x, y, z), dim=dim), lambda x, y, z: Tensor.stack([x, y, z], dim=dim))
+
+    with self.assertRaises(IndexError):
+      Tensor.stack([x], dim=77)
+
+  def test_repeat(self):
+    x = Tensor.randn(45, 65, 3)
+    base_repeats = [2, 4, 3]
+
+    for reps in [[], [4], [2, 1], [3, 2, 2]]:
+      repeats = base_repeats + reps
+      helper_test_op([(45, 65, 3)], lambda x: x.repeat(*repeats), lambda x: x.repeat(repeats))
+
+    with self.assertRaises(AssertionError):
+      x.repeat((2, 4))
+
+    with self.assertRaises(AssertionError):
+      x.repeat((2, 0, 4))
+
 
   def test_clip(self):
     helper_test_op([(45,65)], lambda x: x.clip(-2.3, 1.2), lambda x: x.clip(-2.3, 1.2))

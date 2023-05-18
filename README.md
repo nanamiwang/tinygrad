@@ -71,7 +71,7 @@ print(y.grad)  # dz/dy
 Try a matmul. See how, despite the style, it is fused into one kernel with the power of laziness.
 
 ```python
-DEBUG=3 OPTLOCAL=1 GPU=1 python3 -c "from tinygrad.tensor import Tensor;
+DEBUG=3 OPTLOCAL=1 python3 -c "from tinygrad.tensor import Tensor;
 N = 1024; a, b = Tensor.randn(N, N), Tensor.randn(N, N);
 c = (a.reshape(N, 1, N) * b.permute(1,0).reshape(1, N, N)).sum(axis=2);
 print((c.numpy() - (a.numpy() @ b.numpy())).mean())"
@@ -81,7 +81,7 @@ Change to `DEBUG=4` to see the generated code.
 
 ## Neural networks?
 
-It turns out, a decent autograd tensor library is 90% of what you need for neural networks. Add an optimizer (SGD, RMSprop, and Adam implemented) from tinygrad.nn.optim, write some boilerplate minibatching code, and you have all you need.
+It turns out, a decent autograd tensor library is 90% of what you need for neural networks. Add an optimizer (SGD, Adam, AdamW implemented) from tinygrad.nn.optim, write some boilerplate minibatching code, and you have all you need.
 
 ### Neural network example (from test/models/test_mnist.py)
 
@@ -145,7 +145,7 @@ hlops are syntactic sugar around mlops. They support most things torch does.
 mlops are mid level ops. They understand derivatives. They are very simple.
 
 ```
-Log, Exp                                       # unary ops
+Relu, Log, Exp                                 # unary ops
 Sum, Max                                       # reduce ops (with axis argument)
 Maximum, Add, Sub, Mul, Pow, Div, Equal        # binary ops (no broadcasting, use expand)
 Expand, Reshape, Permute, Pad, Shrink, Flip    # movement ops
@@ -159,7 +159,7 @@ The autodiff stuff is all in mlops now so you can focus on the raw operations
 
 ```
 Buffer                                                       # class of memory on this device
-unary_op  (NOOP, NEG, NOT, EXP, LOG)                         # A -> A
+unary_op  (NOOP, EXP, LOG, CAST)                             # A -> A
 reduce_op (SUM, MAX)                                         # A -> B (smaller size, B has 1 in shape)
 binary_op (ADD, SUB, MUL, DIV, POW, CMPEQ, MAX)              # A + A -> A (all the same size)
 movement_op (EXPAND, RESHAPE, PERMUTE, PAD, SHRINK, STRIDE)  # A -> B (different size)
@@ -180,15 +180,13 @@ Or, if you have a webcam and cv2 installed
 ipython3 examples/efficientnet.py webcam
 ```
 
-PROTIP: Set "GPU=1" environment variable if you want this to go faster.
-
-PROPROTIP: Set "DEBUG=1" environment variable if you want to see why it's slow.
+PROTIP: Set "DEBUG=1" environment variable if you want to see why it's slow.
 
 ### tinygrad supports Stable Diffusion!
 
 You might need to download the [weight](https://huggingface.co/CompVis/stable-diffusion-v-1-4-original/resolve/main/sd-v1-4.ckpt) of Stable Diffusion and put it into weights/
 
-Run `GPU=1 python3 examples/stable_diffusion.py`
+Run `python3 examples/stable_diffusion.py`
 
 <p align="center">
   <img src="https://raw.githubusercontent.com/geohot/tinygrad/master/docs/stable_diffusion_by_tinygrad.jpg">

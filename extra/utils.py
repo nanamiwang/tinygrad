@@ -20,7 +20,7 @@ def fetch(url):
   with open(fp, "rb") as f:
     return f.read()
 
-def download_file(url, fp, skip_if_exists=False):
+def download_file(url, fp, skip_if_exists=True):
   import requests, os
   if skip_if_exists and os.path.isfile(fp) and os.stat(fp).st_size > 0:
     return
@@ -129,8 +129,8 @@ def load_single_weight(t:Tensor, myfile, shape, strides, dtype, storage_offset, 
   # this needs real APIs
   if t.device in ["METAL", "CLANG", "LLVM"]:
     del t.lazydata.op
-    t.lazydata.realized = t.lazydata.dbuffer(t.shape, dtype=t.dtype)
-    myfile.readinto(t.lazydata.realized.raw()._buffer())
+    t.lazydata.realized = Device[t.lazydata.device].buffer(prod(t.shape), dtype=t.dtype)
+    myfile.readinto(t.lazydata.realized._buffer())
   else:
     def _mmap(lna):
       assert myfile._compress_type == 0, "compressed data can't be mmaped"

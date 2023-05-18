@@ -58,8 +58,6 @@ def train_step_jitted(model, optimizer, X, Y):
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
-  #optimizer.lr *= 0.995  # decay LR
-  #optimizer.lr.realize()
   return loss.realize()
 
 def fetch_batch(X_train, Y_train, BS):
@@ -73,23 +71,33 @@ def fetch_batch(X_train, Y_train, BS):
 
 def train_cifar():
   Tensor.training = True
-  BS = getenv("BS", 512)
+  BS, STEPS = getenv("BS", 512), getenv("STEPS", 10)
   if getenv("FAKEDATA"):
     N = 2048
     X_train = np.random.default_rng().standard_normal(size=(N, 3, 32, 32), dtype=np.float32)
     Y_train = np.random.randint(0,10,size=(N), dtype=np.int32)
     X_test, Y_test = X_train, Y_train
   else:
-    X_train,Y_train = fetch_cifar(train=True)
-    X_test,Y_test = fetch_cifar(train=False)
+    X_train, Y_train = fetch_cifar(train=True)
+    X_test, Y_test = fetch_cifar(train=False)
   print(X_train.shape, Y_train.shape)
   Xt, Yt = fetch_batch(X_test, Y_test, BS=BS)
   model = SpeedyResNet()
+
+  # init weights with torch
+  if getenv("TORCHWEIGHTS"):
+    from examples.hlb_cifar10_torch import SpeedyResNet as SpeedyResNetTorch
+    torch_model = SpeedyResNetTorch()
+    model_state_dict = optim.get_state_dict(model)
+    torch_state_dict = torch_model.state_dict()
+    for k,v in torch_state_dict.items():
+      print(f"initting {k} from torch")
+      model_state_dict[k].assign(Tensor(v.detach().numpy())).realize()
+
   if getenv("ADAM"):
     optimizer = optim.Adam(optim.get_parameters(model), lr=Tensor([0.001]).realize())
   else:
-    #optimizer = optim.SGD(optim.get_parameters(model), lr=0.001)
-    optimizer = optim.SGD(optim.get_parameters(model), lr=Tensor([0.003]).realize(), momentum=0.85, nesterov=True)
+    optimizer = optim.SGD(optim.get_parameters(model), lr=0.01, momentum=0.85, nesterov=True)
 
   # 97 steps in 2 seconds = 20ms / step
   # step is 1163.42 GOPS = 56 TFLOPS!!!, 41% of max 136
@@ -101,15 +109,15 @@ def train_cifar():
   # 136 TFLOPS is the theoretical max w float16 on 3080 Ti
 
   X, Y = fetch_batch(X_train, Y_train, BS=BS)
-  for i in range(getenv("STEPS", 10)):
-    #new_lr = (0.003 * i/300) if i < 300 else min(0.00001, 0.003 - 0.003 * i/300)
-    #optimizer.lr = Tensor([new_lr]).realize()
-
-    if i%10 == 0:
+  for i in range(max(1, STEPS)):
+    if i%10 == 0 and STEPS != 1:
       # use training batchnorm (and no_grad would change the kernels)
-      outs = model(Xt).numpy().argmax(axis=1)
+      out = model(Xt)
+      outs = out.numpy().argmax(axis=1)
+      loss = (out * Yt).mean().numpy()[0]
       correct = outs == Yt.numpy().argmin(axis=1)
-      print(f"eval {sum(correct)}/{len(correct)} {sum(correct)/len(correct)*100.0:.2f}%")
+      print(f"eval {sum(correct)}/{len(correct)} {sum(correct)/len(correct)*100.0:.2f}%, {loss:7.2f} val_loss")
+    if STEPS == 0: break
     GlobalCounters.reset()
     st = time.monotonic()
     loss = train_step_jitted(model, optimizer, X, Y)

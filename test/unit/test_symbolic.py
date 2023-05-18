@@ -24,6 +24,19 @@ class TestSymbolic(unittest.TestCase):
     self.helper_test_variable(Variable("a", 3, 8)<3, 0, 0, "0")
     self.helper_test_variable(Variable("a", 3, 8)<2, 0, 0, "0")
 
+  def test_ge_divides(self):
+    expr = (Variable("idx", 0, 511)*4 + Variable("FLOAT4_INDEX", 0, 3)) < 512
+    self.helper_test_variable(expr, 0, 1, "(((idx*4)+FLOAT4_INDEX)<512)")
+    self.helper_test_variable(expr//4, 0, 1, "(idx<128)")
+
+  def test_ge_divides_and(self):
+    expr = Variable.ands([(Variable("idx1", 0, 511)*4 + Variable("FLOAT4_INDEX", 0, 3)) < 512,
+                          (Variable("idx2", 0, 511)*4 + Variable("FLOAT4_INDEX", 0, 3)) < 512])
+    self.helper_test_variable(expr//4, 0, 1, "((idx1<128) and (idx2<128))")
+    expr = Variable.ands([(Variable("idx1", 0, 511)*4 + Variable("FLOAT4_INDEX", 0, 3)) < 512,
+                          (Variable("idx2", 0, 511)*4 + Variable("FLOAT8_INDEX", 0, 7)) < 512])
+    self.helper_test_variable(expr//4, 0, 1, "((((FLOAT8_INDEX//4)+idx2)<128) and (idx1<128))")
+
   def test_div_becomes_num(self):
     assert isinstance(Variable("a", 2, 3)//2, NumNode)
 
@@ -71,6 +84,9 @@ class TestSymbolic(unittest.TestCase):
 
   def test_mul_1(self):
     self.helper_test_variable(Variable("a", 0, 8)*1, 0, 8, "a")
+
+  def test_mul_neg_1(self):
+    self.helper_test_variable((Variable("a", 0, 2)*-1)//3, -1, 0, "((((a*-1)+3)//3)+-1)")
 
   def test_mul_2(self):
     self.helper_test_variable(Variable("a", 0, 8)*2, 0, 16, "(a*2)")
@@ -179,6 +195,9 @@ class TestSymbolic(unittest.TestCase):
 
   def test_div_numerator_negative(self):
     self.helper_test_variable((Variable("idx", 0, 9)*-10)//11, -9, 0, "((((idx*-10)+99)//11)+-9)")
+
+  def test_div_into_mod(self):
+    self.helper_test_variable((Variable("idx", 0, 16)*4)%8//4, 0, 1, "(idx%2)")
 
 class TestSymbolicNumeric(unittest.TestCase):
   def helper_test_numeric(self, f):

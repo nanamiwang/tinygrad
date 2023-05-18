@@ -4,9 +4,6 @@ from tinygrad.helpers import getenv
 from tinygrad.lazy import Device
 from tinygrad.tensor import Tensor, dtypes
 
-# for GPU, cl_khr_fp16 isn't supported
-# for LLVM, it segfaults because it can't link to the casting function
-@unittest.skipIf(getenv("CI", "") != "" and Device.DEFAULT in ["GPU", "LLVM"], "float16 broken in some CI backends")
 class TestQuantization(unittest.TestCase):
   def test_8_bit_quantization(self):
     QK = 32

@@ -3,10 +3,10 @@ from tinygrad.tensor import Tensor
 
 class BatchNorm2d:
   def __init__(self, sz, eps=1e-5, affine=True, track_running_stats=True, momentum=0.1):
-    assert affine, "BatchNorm2d is only supported with affine"
     self.eps, self.track_running_stats, self.momentum = eps, track_running_stats, momentum
 
-    self.weight, self.bias = Tensor.ones(sz), Tensor.zeros(sz)
+    if affine: self.weight, self.bias = Tensor.ones(sz), Tensor.zeros(sz)
+    else: self.weight, self.bias = None, None
 
     self.running_mean, self.running_var = Tensor.zeros(sz, requires_grad=False), Tensor.ones(sz, requires_grad=False)
     self.num_batches_tracked = Tensor.zeros(1, requires_grad=False)
@@ -16,33 +16,29 @@ class BatchNorm2d:
       # This requires two full memory accesses to x
       # https://github.com/pytorch/pytorch/blob/c618dc13d2aa23625cb0d7ada694137532a4fa33/aten/src/ATen/native/cuda/Normalization.cuh
       # There's "online" algorithms that fix this, like https://en.wikipedia.org/wiki/Algorithms_for_calculating_variance#Welford's_Online_algorithm
-      x_detached = x.detach()
-      batch_mean = x_detached.mean(axis=(0,2,3))
-      y = (x_detached - batch_mean.reshape(shape=[1, -1, 1, 1]))
+      batch_mean = x.mean(axis=(0,2,3))
+      y = (x - batch_mean.reshape(shape=[1, -1, 1, 1]))
       batch_var = (y*y).mean(axis=(0,2,3))
       batch_invstd = batch_var.add(self.eps).pow(-0.5)
-      self.batch_invstd = None
 
       # NOTE: wow, this is done all throughout training in most PyTorch models
       if self.track_running_stats:
-        self.running_mean.assign((1 - self.momentum) * self.running_mean + self.momentum * batch_mean)
-        self.running_var.assign((1 - self.momentum) * self.running_var + self.momentum * batch_var)
+        self.running_mean.assign((1 - self.momentum) * self.running_mean + self.momentum * batch_mean.detach())
+        self.running_var.assign((1 - self.momentum) * self.running_var + self.momentum * batch_var.detach())
         self.num_batches_tracked += 1
     else:
-      batch_mean, batch_var = self.running_mean, self.running_var
-      # NOTE: this can be precomputed for static inference. if you manually update running_var, you have to reset this
-      if not hasattr(self, "batch_invstd") or not self.batch_invstd:
-        self.batch_invstd = batch_var.add(self.eps).pow(-0.5)
-      batch_invstd = self.batch_invstd
+      batch_mean = self.running_mean
+      # NOTE: this can be precomputed for static inference. we expand it here so it fuses
+      batch_invstd = self.running_var.reshape(1, -1, 1, 1).expand(x.shape).add(self.eps).rsqrt()
 
     return x.batchnorm(self.weight, self.bias, batch_mean, batch_invstd)
 
 # TODO: is this good weight init?
 class Conv2d:
   def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True):
-    self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else (kernel_size[0], kernel_size[1])
+    self.kernel_size = (kernel_size, kernel_size) if isinstance(kernel_size, int) else tuple(kernel_size)
     self.stride, self.padding, self.dilation, self.groups = stride, padding, dilation, groups
-    self.weight = Tensor.glorot_uniform(out_channels, in_channels//groups, self.kernel_size[0], self.kernel_size[1])
+    self.weight = Tensor.glorot_uniform(out_channels, in_channels//groups, *self.kernel_size)
     self.bias = Tensor.zeros(out_channels) if bias else None
 
   def __call__(self, x):
@@ -69,15 +65,19 @@ class GroupNorm:
 
     if self.weight is None or self.bias is None: return x
     # elementwise_affine on channels
-    return x * self.weight.reshape(1, -1, 1, 1) + self.bias.reshape(1, -1, 1, 1)
+    return x * self.weight.reshape(1, -1, *[1 for _ in range(len(x.shape)-2)]) + self.bias.reshape(1, -1, *[1 for _ in range(len(x.shape)-2)])
 
 class LayerNorm:
   def __init__(self, normalized_shape:Union[int, Tuple[int, ...]], eps:float=1e-5, elementwise_affine:bool=True):
-    normalized_shape = (normalized_shape,) if isinstance(normalized_shape, int) else tuple(normalized_shape)
-    self.axis, self.eps, self.elementwise_affine = tuple(-1-i for i in range(len(normalized_shape))), eps, elementwise_affine
-    self.weight, self.bias = (Tensor.ones(*normalized_shape), Tensor.zeros(*normalized_shape)) if elementwise_affine else (None, None)
+    self.normalized_shape = (normalized_shape,) if isinstance(normalized_shape, int) else tuple(normalized_shape)
+    self.axis, self.eps, self.elementwise_affine = tuple(-1-i for i in range(len(self.normalized_shape))), eps, elementwise_affine
+    self.weight, self.bias = (Tensor.ones(*self.normalized_shape), Tensor.zeros(*self.normalized_shape)) if elementwise_affine else (None, None)
 
   def __call__(self, x:Tensor):
+    assert self.normalized_shape == x.shape[-len(self.normalized_shape):], f"last dimensions of {x.shape} must match {self.normalized_shape}"
     x = x.layernorm(eps=self.eps, axis=self.axis)
     if not self.elementwise_affine: return x
     return x * self.weight + self.bias
+
+class LayerNorm2d(LayerNorm):
+  def __call__(self, x): return super().__call__(x.permute(0, 2, 3, 1)).permute(0, 3, 1, 2)

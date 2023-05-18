@@ -11,13 +11,6 @@ class Optimizer:
     self.params: List[Tensor] = [x for x in params if x.requires_grad]
     self.buffers: List[Tensor] = [x for x in params if not x.requires_grad]   # buffers are still realized
 
-  # TODO: this probably shouldn't change the gradients, just the ones used by the optimizer
-  def clipnorm(self, amount=1):
-    for param in self.params:
-      assert param.grad is not None
-      # clipnorm is the L2 norm, not value: is this right?
-      param.grad.assign(param.grad.clip(-(amount**2), (amount**2)))
-
   def zero_grad(self):
     for param in self.params: param.grad = None
 
@@ -44,26 +37,11 @@ class SGD(Optimizer):
       t.assign(t.detach() - g * self.lr)
     self.realize(self.b)
 
-class RMSprop(Optimizer):
-  def __init__(self, params: List[Tensor], lr=0.001, alpha=0.99, eps=1e-8):
-    super().__init__(params)
-    self.lr, self.alpha, self.eps = lr, alpha, eps
-
-    self.v = [Tensor.zeros(*t.shape, device=t.device, requires_grad=False) for t in self.params]
-
-  def step(self) -> None:
-    for i, t in enumerate(self.params):
-      assert t.grad is not None
-      g = t.grad.realize()
-      self.v[i].assign(self.alpha * self.v[i] + (1.0 - self.alpha) * (g * g)).realize()
-      t.assign(t.detach() - (g * self.lr).div(self.v[i].sqrt() + self.eps))
-    self.realize(self.v)
-
-class Adam(Optimizer):
-  def __init__(self, params: List[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8):
+class AdamW(Optimizer):
+  def __init__(self, params: List[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8, wd=0.01):
     super().__init__(params)
     # NOTE: self.t is a tensor so Adam can be jitted
-    self.lr, self.b1, self.b2, self.eps, self.t = lr, b1, b2, eps, Tensor([0], requires_grad=False).realize()
+    self.lr, self.b1, self.b2, self.eps, self.wd, self.t = lr, b1, b2, eps, wd, Tensor([0], requires_grad=False).realize()
 
     self.m = [Tensor.zeros(*t.shape, device=t.device, requires_grad=False) for t in self.params]
     self.v = [Tensor.zeros(*t.shape, device=t.device, requires_grad=False) for t in self.params]
@@ -76,8 +54,10 @@ class Adam(Optimizer):
       g = t.grad.realize()
       self.m[i].assign(self.b1 * self.m[i] + (1.0 - self.b1) * g).realize()
       self.v[i].assign(self.b2 * self.v[i] + (1.0 - self.b2) * (g * g)).realize()
-      t.assign(t.detach() - a * self.m[i].div(self.v[i].sqrt() + self.eps))
+      t.assign(t.detach() - a * self.m[i].div(self.v[i].sqrt() + self.eps) - self.lr * self.wd * t.detach())
     self.realize([self.t] + self.m + self.v)
+
+def Adam(params: List[Tensor], lr=0.001, b1=0.9, b2=0.999, eps=1e-8): return AdamW(params, lr, b1, b2, eps, 0.0)
 
 def get_state_dict(obj, prefix:str='') -> Dict[str, Tensor]:
   if isinstance(obj, Tensor): return {prefix.strip('.'):obj}

@@ -2,11 +2,16 @@ import unittest
 import numpy as np
 from tinygrad.lazy import Device
 from tinygrad.tensor import Tensor
-from tinygrad.helpers import dtypes
+from tinygrad.helpers import getenv
 
 def multidevice_test(fxn):
+  exclude_devices = getenv("EXCLUDE_DEVICES", "").split(",")
   def ret(self):
     for device in Device._buffers:
+      print(device)
+      if device in exclude_devices:
+        print(f"WARNING: {device} test is excluded")
+        continue
       with self.subTest(device=device):
         try:
           Device[device]
@@ -17,6 +22,13 @@ def multidevice_test(fxn):
   return ret
 
 class TestExample(unittest.TestCase):
+  @multidevice_test
+  def test_convert_to_cpu(self, device):
+    a = Tensor([[1,2],[3,4]], device=device)
+    assert a.numpy().shape == (2,2)
+    b = a.cpu()
+    assert b.numpy().shape == (2,2)
+
   @multidevice_test
   def test_2_plus_3(self, device):
     a = Tensor([2], device=device)

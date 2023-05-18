@@ -5,8 +5,10 @@ except ImportError:
   nx = None # graph won't work
 from collections import defaultdict
 from typing import Dict, List, Optional
-from tinygrad.ops import DeviceBuffer, UnaryOps, BinaryOps, ReduceOps, MovementOps, LoadOps, FusedOps, Op, OpType, LazyOp, get_buffers, get_lazyops
-from tinygrad.helpers import getenv, DEBUG
+from tinygrad.ops import UnaryOps, BinaryOps, ReduceOps, MovementOps, LoadOps, FusedOps, Op, OpType, LazyOp, get_buffers, get_lazyops
+from tinygrad.lazy import LazyBuffer
+from tinygrad.helpers import getenv, DEBUG, GlobalCounters
+from tinygrad.runtime.lib import RawConst
 
 GRAPH, PRUNEGRAPH, GRAPHPATH = getenv("GRAPH", 0), getenv("PRUNEGRAPH", 0), getenv("GRAPHPATH", "/tmp/net")
 
@@ -14,6 +16,12 @@ GRAPH, PRUNEGRAPH, GRAPHPATH = getenv("GRAPH", 0), getenv("PRUNEGRAPH", 0), gete
 
 G = nx.DiGraph() if nx is not None else None
 cnts: Dict[OpType, int] = defaultdict(int)
+if DEBUG >= 2:
+  def print_globalcounters():
+    if GlobalCounters.time_sum_s == 0: return
+    print(f"avg: {GlobalCounters.global_ops*1e-9/GlobalCounters.time_sum_s:8.2f} GFLOPS {GlobalCounters.global_mem*1e-9/GlobalCounters.time_sum_s:8.2f} GB/s",
+          f"{' '*10}total: {GlobalCounters.kernel_count:5d} kernels {GlobalCounters.global_ops*1e-9:8.2f} GOPS {GlobalCounters.global_mem*1e-9:8.2f} GB {GlobalCounters.time_sum_s*1e3:8.2f} ms")
+  atexit.register(print_globalcounters)
 if GRAPH:
   def save_graph_exit():
     for k,v in cnts.items(): print(k, v)
@@ -37,31 +45,33 @@ def get_sop(op: List[Op]):
   if len(op) <= 4: return '.'.join([str(y).split(".")[1][0:3] for y in op][::-1])
   return str(len(op))
 
-def log_op(ret: DeviceBuffer, ast: LazyOp, show_graph: Optional[bool] = None):
+def str_dtype(dtyp):
+  ret = str(dtyp)[7:]
+  return "" if ret == 'float' else f"\n{ret}"
+
+def log_op(ret: LazyBuffer, ast: LazyOp, show_graph: Optional[bool] = None, phantom=False):
   if show_graph is None: show_graph = bool(GRAPH)
   if not DEBUG and not show_graph: return
   op: List[Op] = [x.op for x in get_lazyops(ast)]
-  inp: List[DeviceBuffer] = get_buffers(ast)
-  if len(inp) == 1 and inp[0] == ret:
-    if show_graph and nm(ret) in G.nodes: G.nodes[nm(ret)]['style'] += ', bold'
-    return   # don't log self loops
+  inp: List[LazyBuffer] = [x for x in get_buffers(ast) if not isinstance(x.realized, RawConst) or GRAPH > 1]
   oporder = [LoadOps, FusedOps, ReduceOps, BinaryOps, UnaryOps, MovementOps]
   optype = type(sorted(op, key=lambda x: oporder.index(type(x)))[0])
   cnts[optype] += 1
-  if DEBUG >= 4: print(f"{op} : {', '.join([f'{x.shape}-<{nm(x)}>' for x in inp])} -> {ret.shape}-<{nm(ret)}>")
+  if DEBUG >= 6: print(f"{op} : {', '.join([f'{x.shape}-<{nm(x)}>' for x in inp])} -> {ret.shape}-<{nm(ret)}>")
   if show_graph:
     top_colors = {LoadOps: '#FFFF80', UnaryOps: "#c0c0c0", ReduceOps: "#8080ff", BinaryOps: "#c0c0c0", MovementOps: "#80ff80", FusedOps: "#ff8080"}
     dashed = (optype == LoadOps and hasattr(ret, "_backing")) or (hasattr(ret, "st") and not ret.st.contiguous)  # type: ignore
 
     for x in inp:
-      G.add_edge(nm(x), nm(ret), label=get_sop(op))
+      G.add_edge(nm(x), nm(ret), label=get_sop(op), color='#00000060' if phantom else 'black')
       if 'label' not in G.nodes[nm(x)]:
-        G.nodes[nm(x)]['label'] = str(x.shape)
+        G.nodes[nm(x)]['label'] = str(x.shape)+str_dtype(ret.dtype)
     if nm(ret) not in G.nodes: G.add_node(nm(ret))
 
-    G.nodes[nm(ret)]['label'] = str(set(x.shape for x in inp))+"\n"+str(ret.shape) if optype == ReduceOps else str(ret.shape)
-    G.nodes[nm(ret)]['fillcolor'] = (top_colors[optype] + ('80' if dashed else str())) if optype in top_colors else "#ffffff"
-    G.nodes[nm(ret)]['style'] = 'filled, dashed' if dashed else 'filled'
+    G.nodes[nm(ret)]['label'] = (str(set(x.shape for x in inp))+"\n"+str(ret.shape) if optype == ReduceOps else str(ret.shape))+str_dtype(ret.dtype)
+    G.nodes[nm(ret)]['fillcolor'] = (top_colors[optype] + ('60' if phantom else ('80' if dashed else str()))) if optype in top_colors else "#ffffff"
+    G.nodes[nm(ret)]['color'] = 'white' if phantom else 'black'
+    G.nodes[nm(ret)]['style'] = ('filled, dashed' if dashed else 'filled')
     G.nodes[nm(ret)]['prunable'] = optype in [LoadOps, MovementOps]
 
 # prune movementops and loadops
