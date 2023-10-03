@@ -48,8 +48,8 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
   __shared__ half16 a_lds[16*{KX}];
   __shared__ half16 b_lds[16*{KY}];
 
-  half16 a_frag;
-  half16 b_frag;
+  half16 a_frag[{KX}];
+  half16 b_frag[{KX}];
   #ifdef F32
     float8 c_frag[{KY}][{KX}] = {{}};
   #else
@@ -57,40 +57,42 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
   #endif
 
   for (int k = 0; k < {N}; k += 16) {{
-    for (int ele = 0; ele < 16; ++ele) {{
-      for(int kk = 0; kk < {KX}/2;kk++) {{
+    __syncthreads();
+    for(int kk = 0; kk < {KX}/2;kk++) {{
+      for (int ele = 0; ele < 16; ++ele) {{
         a_lds[threadIdx.x + 32*kk][ele] = a[(k+ele) + (threadIdx.x/16 +2*kk)*{16*N} + {N}*(threadIdx.x%16)];
       }}
     }}
-
     for (int ele = 0; ele < 16; ++ele) {{
       for(int kk = 0; kk < {KY}/2;kk++) {{
         b_lds[threadIdx.x+32*kk][ele] = b[(k+ele)*{N} + (threadIdx.x/16 + 2*kk)*16 + threadIdx.x%16];
       }}
     }}
+
     __syncthreads();
 
     for (int y = 0; y < {KY}; y++) {{
       for (int x = 0; x < {KX}; x++) {{
         for (int ele = 0; ele < 16; ++ele) {{
-          a_frag[ele] = a_lds[x*16 + lane][ele];
+          a_frag[x][ele] = a_lds[x*16 + lane][ele];
         }}
         for (int ele = 0; ele < 16; ++ele) {{
-          b_frag[ele] = b_lds[y*16 + lane][ele];
+          b_frag[x][ele] = b_lds[y*16 + lane][ele];
         }}
-
+      }}
+      for (int x = 0; x < {KX}; x++) {{
         #ifdef F32
-          c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x]);
+          c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[x], c_frag[y][x]);
         #else
-          c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x], false);
+          c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[]x], c_frag[y][x], false);
         #endif
       }}
     }}
   }}
 
-  for (int ele = 0; ele < 8; ++ele) {{
-    for (int y = 0; y < {KY}; y++) {{
-      for (int x = 0; x < {KX}; x++) {{
+  for (int x = 0; x < {KX}; x++) {{
+    for (int ele = 0; ele < 8; ++ele) {{
+      for (int y = 0; y < {KY}; y++) {{
         #ifdef F32
           c[ele*{2*N} + y*16 + x*{16*N}] = c_frag[y][x][ele];
         #else
