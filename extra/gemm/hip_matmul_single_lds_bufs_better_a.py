@@ -63,8 +63,8 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
       a_lds[row][threadIdx.x] = a[k+threadIdx.x + {N}*row];
     }}
     __syncthreads();
-    for (int ele = 0; ele < 32; ++ele) {{
-      for(int kk = 0; kk < {KY}/2;kk++) {{
+    for(int kk = 0; kk < {KY}/2;kk++) {{
+      for (int ele = 0; ele < 32; ++ele) {{
         b_lds[threadIdx.x+32*kk][ele] = b[(k+ele)*{N} + (threadIdx.x/16 + 2*kk)*16 + threadIdx.x%16];
       }}
     }}

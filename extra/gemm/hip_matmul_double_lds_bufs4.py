@@ -34,9 +34,7 @@ prog = HIPProgram("test", f"""
 #define F32
 typedef float float8 __attribute__((ext_vector_type(8)));
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
-typedef _Float16 half8 __attribute__((ext_vector_type(8)));
-
-extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, __half*  b) {{
+extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, __half* b) {{
   const int gx = blockIdx.x;
   const int gy = blockIdx.y;
 
@@ -47,111 +45,118 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
   a += gx*{KX*16}*{N};
   b += gy*{KY*16};
 
-  __shared__ half8 a_lds[32*2];
-  __shared__ half8 b_lds[32*2];
+  // KX&KY must be >= 2
+  // Double buffers
+  __shared__ half16 a_lds[16*{KX}*2];
+  __shared__ half16 b_lds[16*{KY}*2];
 
-  half8 *a_lds_ptr_0 = &a_lds[0];
-  half8 *a_lds_ptr_1 = &a_lds[32];
+  auto *a_lds_ptr_0 = &a_lds[0];
+  auto *a_lds_ptr_1 = &a_lds[16*{KX}];
 
-  half8 *b_lds_ptr_0 = &b_lds[0];
-  half8 *b_lds_ptr_1 = &b_lds[32];
+  auto *b_lds_ptr_0 = &b_lds[0];
+  auto *b_lds_ptr_1 = &b_lds[16*{KX}];
 
-  // Global mem reader
-  half8 a_gr;
-  half8 b_gr;
-
-  half16 a_frag[{KX}];
-  half16 b_frag[{KY}];
+  half16 a_frag;
+  half16 b_frag;
   #ifdef F32
     float8 c_frag[{KY}][{KX}] = {{}};
   #else
     half16 c_frag[{KY}][{KX}] = {{}};
   #endif
 
-  // Preftech for K=0
-  for (int ele = 0; ele < 8; ++ele) {{
-    a_gr[ele] = a[(0+ele+threadIdx.x/16*8) + {N}*(threadIdx.x%16)];
+  // Global mem reader
+  half a_gr[{KX}*16/2];
+  half16 b_gr[{KY}/2];
+
+  // Prefetch for k = 0
+  for(int row = 0; row < {KX}*16/2;row++) {{
+    // For KX=4, Thread 0-15 load tile 0 - 31, Thread 16-31 load tile 32-63
+    // For KX=2, Thread 0-15 load tile 0 - 15, Thread 16-31 load tile 16-31
+    a_gr[row] = a[0+threadIdx.x%16+row*{N}+threadIdx.x/16*{KX}*8*{N}];
   }}
 
-  for (int ele = 0; ele < 8; ++ele) {{
-    b_gr[ele] = b[(0+ele+threadIdx.x/16*8)*{N} + threadIdx.x%16];
+  for (int ele = 0; ele < 16; ++ele) {{
+    for(int kk = 0; kk < {KY}/2;kk++) {{
+      b_gr[kk][ele] = b[(0+ele)*{N} + (threadIdx.x/16 + 2*kk)*16 + threadIdx.x%16];
+    }}
   }}
 
-  for (int ele = 0; ele < 8; ++ele) {{
-    a_lds_ptr_0[threadIdx.x][ele] = a_gr[ele];
-  }}
-  for (int ele = 0; ele < 8; ++ele) {{
-    b_lds_ptr_0[threadIdx.x][ele] = b_gr[ele];
+  for(int row = 0; row < {KX}*16/2;row++) {{
+    a_lds_ptr_0[row+threadIdx.x/16*{KX}*8][threadIdx.x%16] = a_gr[row];
   }}
 
-  __syncthreads();
-  for (int k = 0; k < {N}-16; k += 16) {{
-    for (int ele = 0; ele < 8; ++ele) {{
-      a_frag[0][ele] = a_lds_ptr_0[lane][ele];
+  for (int ele = 0; ele < 16; ++ele) {{
+    for(int kk = 0; kk < {KY}/2;kk++) {{
+      b_lds_ptr_0[threadIdx.x+32*kk][ele] = b_gr[kk][ele];
     }}
-    for (int ele = 8; ele < 16; ++ele) {{
-      a_frag[0][ele] = a_lds_ptr_0[lane+16][ele-8];
-    }}
-    for (int ele = 0; ele < 8; ++ele) {{
-      b_frag[0][ele] = b_lds_ptr_0[lane][ele];
-    }}
-    for (int ele = 8; ele < 16; ++ele) {{
-      b_frag[0][ele] = b_lds_ptr_0[lane+16][ele-8];
-    }}
+  }}
 
+
+  for (int k = 0; k < {N-16}; k += 16) {{
     __syncthreads();
-    // Prefetch for K+16
-    for (int ele = 0; ele < 8; ++ele) {{
-      a_gr[ele] = a[(k+16+ele+threadIdx.x/16*8) + {N}*(threadIdx.x%16)];
+    // Prefetch for k+16
+    for(int row = 0; row < {KX}*16/2;row++) {{
+      a_gr[row] = a[k+16+threadIdx.x%16+row*{N}+threadIdx.x/16*{KX}*8*{N}];
     }}
 
-    for (int ele = 0; ele < 8; ++ele) {{
-      b_gr[ele] = b[(k+16+ele+threadIdx.x/16*8)*{N} + threadIdx.x%16];
+    for(int kk = 0; kk < {KY}/2;kk++) {{
+      for (int ele = 0; ele < 16; ++ele) {{
+        b_gr[kk][ele] = b[(k+16+ele)*{N} + (threadIdx.x/16 + 2*kk)*16 + threadIdx.x%16];
+      }}
     }}
 
     for (int y = 0; y < {KY}; y++) {{
       for (int x = 0; x < {KX}; x++) {{
+        for (int ele = 0; ele < 16; ++ele) {{
+          a_frag[ele] = a_lds_ptr_0[x*16 + lane][ele];
+        }}
+
+        for (int ele = 0; ele < 16; ++ele) {{
+          b_frag[ele] = b_lds_ptr_0[y*16 + lane][ele];
+        }}
+
         #ifdef F32
-          c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
+          c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x]);
         #else
-          c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x], false);
+          c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x], false);
         #endif
       }}
     }}
-    for (int ele = 0; ele < 8; ++ele) {{
-      a_lds_ptr_1[threadIdx.x][ele] = a_gr[ele];
+
+    for(int row = 0; row < {KX}*16/2;row++) {{
+      a_lds_ptr_1[row+threadIdx.x/16*{KX}*8][threadIdx.x%16] = a_gr[row];
     }}
-    for (int ele = 0; ele < 8; ++ele) {{
-      b_lds_ptr_1[threadIdx.x][ele] = b_gr[ele];
+
+    for (int ele = 0; ele < 16; ++ele) {{
+      for(int kk = 0; kk < {KX}/2;kk++) {{
+        b_lds_ptr_1[threadIdx.x+32*kk][ele] = b_gr[kk][ele];
+      }}
     }}
-    __syncthreads();
-    half8 *a_tmp = a_lds_ptr_0;
+
+    auto *a_tmp = a_lds_ptr_0;
     a_lds_ptr_0 = a_lds_ptr_1;
     a_lds_ptr_1 = a_tmp;
 
-    half8 *b_tmp = b_lds_ptr_0;
+    auto *b_tmp = b_lds_ptr_0;
     b_lds_ptr_0 = b_lds_ptr_1;
     b_lds_ptr_1 = b_tmp;
+
   }}
 
-  for (int ele = 0; ele < 8; ++ele) {{
-    a_frag[0][ele] = a_lds_ptr_0[lane][ele];
-  }}
-  for (int ele = 8; ele < 16; ++ele) {{
-    a_frag[0][ele] = a_lds_ptr_0[lane+16][ele-8];
-  }}
-  for (int ele = 0; ele < 8; ++ele) {{
-    b_frag[0][ele] = b_lds_ptr_0[lane][ele];
-  }}
-  for (int ele = 8; ele < 16; ++ele) {{
-    b_frag[0][ele] = b_lds_ptr_0[lane+16][ele-8];
-  }}
   for (int y = 0; y < {KY}; y++) {{
     for (int x = 0; x < {KX}; x++) {{
+      for (int ele = 0; ele < 16; ++ele) {{
+        a_frag[ele] = a_lds_ptr_0[x*16 + lane][ele];
+      }}
+
+      for (int ele = 0; ele < 16; ++ele) {{
+        b_frag[ele] = b_lds_ptr_0[y*16 + lane][ele];
+      }}
+
       #ifdef F32
-        c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
+        c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x]);
       #else
-        c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x], false);
+        c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x], false);
       #endif
     }}
   }}
