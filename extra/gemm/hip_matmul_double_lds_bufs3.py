@@ -110,6 +110,10 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
     }}
 
     for (int y = 0; y < {KY}; y++) {{
+      for (int ele = 0; ele < 16; ++ele) {{
+        b_frag[ele] = b_lds_ptr_0[y*16 + lane][ele];
+      }}
+
       for (int x = 0; x < {KX}; x++) {{
         for (int ele = 0; ele < 16; ++ele) {{
           a_frag[ele] = a_lds_ptr_0[x*16 + lane][ele];
