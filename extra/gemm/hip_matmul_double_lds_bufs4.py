@@ -95,6 +95,7 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
   for (int k = 0; k < {N-16}; k += 16) {{
     __syncthreads();
     // Prefetch for k+16
+
     for(int row = 0; row < {KX}*16/2;row++) {{
       a_gr[row] = a[k+16+threadIdx.x%16+row*{N}+threadIdx.x/16*{KX}*8*{N}];
     }}
@@ -102,6 +103,16 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
     for(int kk = 0; kk < {KY}/2;kk++) {{
       for (int ele = 0; ele < 16; ++ele) {{
         b_gr[kk][ele] = b[(k+16+ele)*{N} + (threadIdx.x/16 + 2*kk)*16 + threadIdx.x%16];
+      }}
+    }}
+
+    for(int row = 0; row < {KX}*16/2;row++) {{
+      a_lds_ptr_1[row+threadIdx.x/16*{KX}*8][threadIdx.x%16] = a_gr[row];
+    }}
+
+    for (int ele = 0; ele < 16; ++ele) {{
+      for(int kk = 0; kk < {KX}/2;kk++) {{
+        b_lds_ptr_1[threadIdx.x+32*kk][ele] = b_gr[kk][ele];
       }}
     }}
 
@@ -122,7 +133,7 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
         #endif
       }}
     }}
-
+/*
     for(int row = 0; row < {KX}*16/2;row++) {{
       a_lds_ptr_1[row+threadIdx.x/16*{KX}*8][threadIdx.x%16] = a_gr[row];
     }}
@@ -132,7 +143,7 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
         b_lds_ptr_1[threadIdx.x+32*kk][ele] = b_gr[kk][ele];
       }}
     }}
-
+*/
     auto *a_tmp = a_lds_ptr_0;
     a_lds_ptr_0 = a_lds_ptr_1;
     a_lds_ptr_1 = a_tmp;

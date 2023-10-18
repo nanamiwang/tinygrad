@@ -30,37 +30,6 @@ nc = np.random.default_rng().standard_normal(size=(N,N), dtype=np.float32).astyp
 b = RawHIPBuffer.fromCPU(nb)
 c = RawHIPBuffer.fromCPU(nc)
 
-store_lds_statements = []
-for k in range(2):
-  for y in range(4):
-    store_lds_statements.append(f"""
-      for (int x = 0; x < 4; x++) {{
-        b_lds_ptr_1[threadIdx.x+32*{k}][{y}*4+x] = b_gr[{k}][{y}*4+x];
-      }}
-    """)
-
-    store_lds_statements.append(f"""
-      for (int x = 0; x < 4; x++) {{
-        a_lds_ptr_1[threadIdx.x+32*{k}][{y}*4+x] = a_gr[{k}][{y}*4+x];
-      }}
-    """)
-
-wmma_statements = []
-for x in range(4):
-  for y in range(4):
-    wmma_statements.append(f"""
-        #ifdef F32
-          c_frag[{y}][{x}] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[{x}], b_frag[{y}], c_frag[{y}][{x}]);
-        #else
-          c_frag[{y}][{x}] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[{x}], b_frag[{y}], c_frag[{y}][{x}], false);
-        #endif
-"""
-    )
-statements = ""
-for x1, x2 in zip(store_lds_statements, wmma_statements):
-  statements += x1 + x2
-#print(statements)
-
 prog = HIPProgram("test", prog_str := f"""
 #define F32
 typedef float float8 __attribute__((ext_vector_type(8)));
@@ -150,6 +119,7 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
     }}
     // Local read mfma frags from first LDS buffer
     for (int y = 0; y < 4; y++) {{
+
       for (int ele = 0; ele < 16; ++ele) {{
         b_frag[y][ele] = b_lds_ptr_0[y*16 + lane][ele];
       }}
@@ -163,7 +133,8 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
     for (int y = 0; y < 4; y++) {{
       for (int x = 0; x < 4; x++) {{
         #ifdef F32
-          c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
+          //c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
+          asm volatile ("v_wmma_f32_16x16x16_f16 %0, %1, %2, %3;"  : "=v"(c_frag[y][x]) : "v"(a_frag[x]), "v"(b_frag[y]), "v"(c_frag[y][x]));
         #else
           c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x], false);
         #endif
@@ -196,153 +167,8 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
   for (int y = 0; y < {KY}; y++) {{
     for (int x = 0; x < {KX}; x++) {{
       #ifdef F32
-        c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
-      #else
-        c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x], false);
-      #endif
-    }}
-  }}
-
-  for (int ele = 0; ele < 8; ++ele) {{
-    for (int y = 0; y < {KY}; y++) {{
-      for (int x = 0; x < {KX}; x++) {{
-        #ifdef F32
-          c[ele*{2*N} + y*16 + x*{16*N}] = c_frag[y][x][ele];
-        #else
-          c[ele*{2*N} + y*16 + x*{16*N}] = c_frag[y][x][ele*2];
-        #endif
-      }}
-    }}
-  }}
-}}""")
-
-
-
-prog1 = HIPProgram("test", prog_str1 := f"""
-#define F32
-typedef float float8 __attribute__((ext_vector_type(8)));
-typedef _Float16 half16 __attribute__((ext_vector_type(16)));
-extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, __half* b) {{
-  const int gx = blockIdx.x;
-  const int gy = blockIdx.y;
-
-  const int lIdx = threadIdx.x;
-  const int lane = lIdx%16;
-
-  c += gx*{KX*16}*{N} + gy*{KY*16} + (lIdx/16)*{N} + lane;
-  a += gx*{KX*16}*{N};
-  b += gy*{KY*16};
-
-  // KX&KY must be 4
-  // Double buffers
-  __shared__ half16 a_lds[16*4*2];
-  __shared__ half16 b_lds[16*4*2];
-
-  auto *a_lds_ptr_0 = &a_lds[0];
-  auto *a_lds_ptr_1 = &a_lds[16*{KX}];
-
-  auto *b_lds_ptr_0 = &b_lds[0];
-  auto *b_lds_ptr_1 = &b_lds[16*{KX}];
-
-  half16 a_frag[4];
-  half16 b_frag[4];
-  #ifdef F32
-    float8 c_frag[{KY}][{KX}] = {{}};
-  #else
-    half16 c_frag[{KY}][{KX}] = {{}};
-  #endif
-
-  // Global mem reader
-  half16 a_gr[2];
-  half16 b_gr[2];
-
-  // Prefetch for k = 0
-  for (int ele = 0; ele < 16; ++ele) {{
-    a_gr[0][ele] = a[(0+ele) + (threadIdx.x/16 +2*0)*{16*N} + {N}*(threadIdx.x%16)];
-  }}
-  for (int ele = 0; ele < 16; ++ele) {{
-    a_gr[1][ele] = a[(0+ele) + (threadIdx.x/16 +2*1)*{16*N} + {N}*(threadIdx.x%16)];
-  }}
-
-  for (int ele = 0; ele < 16; ++ele) {{
-    b_gr[0][ele] = b[(0+ele)*{N} + (threadIdx.x/16 + 2*0)*16 + threadIdx.x%16];
-  }}
-
-  for (int ele = 0; ele < 16; ++ele) {{
-    b_gr[1][ele] = b[(0+ele)*{N} + (threadIdx.x/16 + 2*1)*16 + threadIdx.x%16];
-  }}
-
-  for (int ele = 0; ele < 16; ++ele) {{
-    a_lds_ptr_0[threadIdx.x + 32*0][ele] = a_gr[0][ele];
-  }}
-
-  for (int ele = 0; ele < 16; ++ele) {{
-    a_lds_ptr_0[threadIdx.x + 32*1][ele] = a_gr[1][ele];
-  }}
-
-  for (int ele = 0; ele < 16; ++ele) {{
-    b_lds_ptr_0[threadIdx.x+32*0][ele] = b_gr[0][ele];
-  }}
-
-  for (int ele = 0; ele < 16; ++ele) {{
-    b_lds_ptr_0[threadIdx.x+32*1][ele] = b_gr[1][ele];
-  }}
-
-//  __syncthreads();
-  for (int k = 0; k < {N-16}; k += 16) {{
-    // Prefetch for k+16
-    for (int ele = 0; ele < 16; ++ele) {{
-      b_gr[0][ele] = b[(k+16+ele)*{N} + (threadIdx.x/16 + 2*0)*16 + threadIdx.x%16];
-      a_gr[0][ele] = a[(k+16+ele) + (threadIdx.x/16 +2*0)*{16*N} + {N}*(threadIdx.x%16)];
-      b_gr[1][ele] = b[(k+16+ele)*{N} + (threadIdx.x/16 + 2*1)*16 + threadIdx.x%16];
-      a_gr[1][ele] = a[(k+16+ele) + (threadIdx.x/16 +2*1)*{16*N} + {N}*(threadIdx.x%16)];
-    }}
-
-
-    // Local read mfma frags from first LDS buffer
-    for (int x = 0; x < 4; x++) {{
-      for (int ele = 0; ele < 16; ++ele) {{
-        a_frag[x][ele] = a_lds_ptr_0[x*16 + lane][ele];
-      }}
-    }}
-
-    for (int y = 0; y < 4; y++) {{
-      for (int ele = 0; ele < 16; ++ele) {{
-        b_frag[y][ele] = b_lds_ptr_0[y*16 + lane][ele];
-      }}
-    }}
-//    __syncthreads();
-    {statements}
-
-    __syncthreads();
-
-    auto *a_tmp = a_lds_ptr_0;
-    a_lds_ptr_0 = a_lds_ptr_1;
-    a_lds_ptr_1 = a_tmp;
-
-    auto *b_tmp = b_lds_ptr_0;
-    b_lds_ptr_0 = b_lds_ptr_1;
-    b_lds_ptr_1 = b_tmp;
-
-  }}
-
-
-  // Local read mfma frags from first LDS buffer
-  for (int x = 0; x < 4; x++) {{
-    for (int ele = 0; ele < 16; ++ele) {{
-      a_frag[x][ele] = a_lds_ptr_0[x*16 + lane][ele];
-    }}
-  }}
-  for (int y = 0; y < 4; y++) {{
-    for (int ele = 0; ele < 16; ++ele) {{
-      b_frag[y][ele] = b_lds_ptr_0[y*16 + lane][ele];
-    }}
-  }}
-
-  for (int y = 0; y < {KY}; y++) {{
-    for (int x = 0; x < {KX}; x++) {{
-      #ifdef F32
-        c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
+        //c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
+        asm volatile ("v_wmma_f32_16x16x16_f16 %0, %1, %2, %3;"  : "=v"(c_frag[y][x]) : "v"(a_frag[x]), "v"(b_frag[y]), "v"(c_frag[y][x]));
       #else
         c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x], false);
       #endif

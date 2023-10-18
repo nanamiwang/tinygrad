@@ -16,8 +16,8 @@ from tinygrad.runtime.ops_hip import RawHIPBuffer, HIPProgram
 #   4194304    324.76 us, would be  52899.88 GFLOPS matmul, 154.98 GB/s
 
 N = getenv("N", 2048)
-KX = getenv("KX", 4)
-KY = getenv("KY", 4)
+KX = 4
+KY = 4
 assert N%(16*KX) == 0, f"N must be multiple of {16*KX}"
 assert N%(16*KY) == 0, f"N must be multiple of {16*KY}"
 FLOPS = N*N*N*2
@@ -34,62 +34,127 @@ prog = HIPProgram("test", f"""
 #define F32
 typedef float float8 __attribute__((ext_vector_type(8)));
 typedef _Float16 half16 __attribute__((ext_vector_type(16)));
-extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, __half*  b) {{
-  const int gx = blockIdx.x;
-  const int gy = blockIdx.y;
+extern "C" __global__ void __launch_bounds__ (128, 1) test(float* c, __half* a, __half* b) {{
+  const int gx = blockIdx.x*2 + threadIdx.y;
+  const int gx_block = blockIdx.x*2;
+  const int gy = blockIdx.y*2 + threadIdx.z;
+  const int gy_block = blockIdx.y*2;
 
   const int lIdx = threadIdx.x;
   const int lane = lIdx%16;
 
   c += gx*{KX*16}*{N} + gy*{KY*16} + (lIdx/16)*{N} + lane;
-  a += gx*{KX*16}*{N};
-  b += gy*{KY*16};
+  a += gx_block*{KX*16}*{N};
+  b += gy_block*{KY*16};
 
-  __shared__ half16 a_lds[16*{KX}];
-  __shared__ half16 b_lds[16*{KY}];
+  // KX&KY must be 4
+  // Double buffers
+  __shared__ half16 a_lds[128*2];
+  __shared__ half16 b_lds[128*2];
 
-  half16 a_frag[{KX}];
-  half16 b_frag[{KY}];
+  auto *a_lds_ptr_0 = &a_lds[0];
+  auto *a_lds_ptr_1 = &a_lds[128];
+
+  auto *b_lds_ptr_0 = &b_lds[0];
+  auto *b_lds_ptr_1 = &b_lds[128];
+
+  half16 a_frag;
+  half16 b_frag;
   #ifdef F32
     float8 c_frag[{KY}][{KX}] = {{}};
   #else
     half16 c_frag[{KY}][{KX}] = {{}};
   #endif
 
-  for (int k = 0; k < {N}; k += 16) {{
-    for (int ele = 0; ele < 16; ++ele) {{
-      for(int kk = 0; kk < {KX}/2;kk++) {{
-        a_lds[threadIdx.x + 32*kk][ele] = a[(k+ele) + (threadIdx.x/16 +2*kk)*{16*N} + {N}*(threadIdx.x%16)];
+  // Global mem reader
+  half16 a_gr;
+  half16 b_gr;
+for (int k = 0; k < {N}; k += 16) {{
+
+  // threadIdx.y为0的线程
+  // a_frag[ele] = a[(k+ele) + x*{16*N} + {N}*lane];
+  // threadIdx.y为1的线程
+  // a_frag[ele] = a[(k+ele) + x*{16*N} + {N}*lane + {KX*16}*{N}];
+  for (int ele = 0; ele < 16; ++ele) {{
+    a_gr[ele] = a[(k+ele) + 0*{16*N} + {N}*lane + threadIdx.y * {KX*16}*{N}];
+  }}
+  // threadIdx.z为0的线程
+  // b_frag[ele] = b[(k+ele)*{N} + y*16 + lane];
+  // threadIdx.z为1的线程
+  // b_frag[ele] = b[(k+ele)*{N} + y*16 + lane + {KY*16}];
+  for (int ele = 0; ele < 16; ++ele) {{
+    b_gr[ele] = b[(k+ele)*{N} + 0*16 + lane + threadIdx.z * {KY*16}];
+  }}
+  for (int ele = 0; ele < 16; ++ele) {{
+    a_lds_ptr_0[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele] = a_gr[ele];
+  }}
+
+  for (int ele = 0; ele < 16; ++ele) {{
+    b_lds_ptr_0[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele] = b_gr[ele];
+  }}
+  __syncthreads();
+
+  for(int xy = 0; xy < 16-1;xy++) {{
+    int x = xy / 4;
+    int y = xy % 4;
+    int next_xy = xy + 1;
+    int next_x = next_xy / 4;
+    int next_y = next_xy % 4;
+    // Prefetch for next_xy
+    if(next_x != x) {{
+      for (int ele = 0; ele < 16; ++ele) {{
+        a_gr[ele] = a[(k+ele) + next_x*{16*N} + {N}*lane + threadIdx.y * {KX*16}*{N}];
+      }}
+    }}
+    if(next_y != y) {{
+      for (int ele = 0; ele < 16; ++ele) {{
+        b_gr[ele] = b[(k+ele)*{N} + next_y*16 + lane + threadIdx.z * {KY*16}];
       }}
     }}
 
     for (int ele = 0; ele < 16; ++ele) {{
-      for(int kk = 0; kk < {KY}/2;kk++) {{
-        b_lds[threadIdx.x+32*kk][ele] = b[(k+ele)*{N} + (threadIdx.x/16 + 2*kk)*16 + threadIdx.x%16];
-      }}
+      b_frag[ele] = b_lds_ptr_0[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele];
+    }}
+
+    for (int ele = 0; ele < 16; ++ele) {{
+      a_frag[ele] = a_lds_ptr_0[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele];
+    }}
+    #ifdef F32
+      c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x]);
+    #else
+      c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x], false);
+    #endif
+
+
+    for (int ele = 0; ele < 16; ++ele) {{
+      a_lds_ptr_1[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele] = a_gr[ele];
+    }}
+    for (int ele = 0; ele < 16; ++ele) {{
+      b_lds_ptr_1[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele] = b_gr[ele];
     }}
     __syncthreads();
+    auto *a_tmp = a_lds_ptr_0;
+    a_lds_ptr_0 = a_lds_ptr_1;
+    a_lds_ptr_1 = a_tmp;
 
-    for (int x = 0; x < {KX}; x++) {{
-      for (int ele = 0; ele < 16; ++ele) {{
-        a_frag[x][ele] = a_lds[x*16 + lane][ele];
-      }}
-    }}
-    for (int y = 0; y < {KY}; y++) {{
-      for (int ele = 0; ele < 16; ++ele) {{
-        b_frag[y][ele] = b_lds[y*16 + lane][ele];
-      }}
-    }}
-    for (int y = 0; y < {KY}; y++) {{
-      for (int x = 0; x < {KX}; x++) {{
-        #ifdef F32
-          c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x]);
-        #else
-          c_frag[y][x] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag[x], b_frag[y], c_frag[y][x], false);
-        #endif
-      }}
-    }}
+    auto *b_tmp = b_lds_ptr_0;
+    b_lds_ptr_0 = b_lds_ptr_1;
+    b_lds_ptr_1 = b_tmp;
   }}
+
+    for (int ele = 0; ele < 16; ++ele) {{
+      b_frag[ele] = b_lds_ptr_0[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele];
+    }}
+
+    for (int ele = 0; ele < 16; ++ele) {{
+      a_frag[ele] = a_lds_ptr_0[threadIdx.x*4 + threadIdx.y*2 + threadIdx.z][ele];
+    }}
+    #ifdef F32
+      c_frag[3][3] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_frag[3][3]);
+    #else
+      c_frag[3][3] = __builtin_amdgcn_wmma_f16_16x16x16_f16_w32(a_frag, b_frag, c_frag[3][3], false);
+    #endif
+}}
 
   for (int ele = 0; ele < 8; ++ele) {{
     for (int y = 0; y < {KY}; y++) {{
@@ -111,7 +176,7 @@ def timeit(fxn):
   #print(f"{ret*1e6:.2f} us")
   return et
 
-global_size, local_size = [N//(KX*16), N//(KY*16), 1], [32, 1, 1]
+global_size, local_size = [N//(KX*16*2), N//(KY*16*2), 1], [32, 2, 2]
 print("global/local size", global_size, local_size, f"local_size:{prod(local_size)} total_size:{prod(global_size+local_size)}")
 tm = min([timeit(lambda: prog(global_size, local_size, a, b, c, wait=True)) for _ in range(1000)])
 na = a.toCPU().reshape(N,N)

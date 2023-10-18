@@ -118,7 +118,6 @@ extern "C" __global__ void __launch_bounds__ (32, 1) test(float* c, __half* a, _
         for (int ele = 0; ele < 16; ++ele) {{
           a_frag[ele] = a_lds_ptr_0[x*16 + lane][ele];
         }}
-
         #ifdef F32
           c_frag[y][x] = __builtin_amdgcn_wmma_f32_16x16x16_f16_w32(a_frag, b_frag, c_frag[y][x]);
         #else
